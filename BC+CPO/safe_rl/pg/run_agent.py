@@ -47,7 +47,10 @@ def run_polopt_agent(env_fn,
                      # Logging:
                      logger=None,
                      logger_kwargs=dict(),
-                     save_freq=1
+                     save_freq=1,
+
+                     add_env_cost=False,
+                     use_exp_as_gauss=True,
                      ):
     # =========================================================================#
     #  Prepare logger, seed, and environment in this process                  #
@@ -266,7 +269,7 @@ def run_polopt_agent(env_fn,
     # =========================================================================#
 
     def update():
-        cur_cost = logger.get_stats('EpCost')[0]
+        cur_cost = logger.get_stats('EpActCost')[0]
         c = cur_cost - cost_lim
         if c > 0 and agent.cares_about_cost:
             logger.log('Warning! Safety constraint is already violated.', 'red')
@@ -333,38 +336,45 @@ def run_polopt_agent(env_fn,
     exp_data = np.load('/home/yzc/Desktop/safe-rl/BC+CPO/scripts/expert_data/expert_data_pointgoal1_cpo.npz')
     exp_state = exp_data['s']
     exp_action = exp_data['a']
-    threshold = 0.9
-    annealing_factor = 2e-2
+    threshold = 0.8
+    annealing_factor = 1e-2
 
     def gaussian_likelihood(x, mu, log_std):
         # std = np.exp(log_std)
         # p = 1 / (np.sqrt(2 * np.pi) * std) * np.exp(-(x - mu) ** 2 / (2 * std ** 2))
         pre_sum = -0.5 * (((x - mu) / (np.exp(log_std) + 1e-8)) ** 2 + 2 * log_std + np.log(2 * np.pi))
-        return np.mean(pre_sum, axis=1)
+        return np.sum(pre_sum, axis=1)
 
-    def compute_dis_cost(obs_list, pi_info_list):
-        action_list=[]
+    def compute_dis_cost(obs_list, pi_info_list, act_list):
+        action_list = []
         for s in obs_list:
-            diff = s-exp_state
-            dis = np.sum(diff**2, axis=1)
+            diff = s - exp_state
+            dis = np.sum(diff ** 2, axis=1)
             closest_index = np.argmin(dis)
             action_list.append(exp_action[closest_index])
-        act = np.array(action_list)
+        exp_act = np.array(action_list)
 
-        mu = np.array([info['mu'][0] for info in pi_info_list])
-        log_std = np.array([info['log_std'] for info in pi_info_list])
+        if not use_exp_as_gauss:
+            # gauss=N(mu,log_std)
+            mu = np.array([info['mu'][0] for info in pi_info_list])
+            log_std = np.array([info['log_std'] for info in pi_info_list])
+            log_p = gaussian_likelihood(exp_act, mu, log_std)
+            p = np.exp(log_p)
+        else:
+            # gauss=N(exp_act,std=0.1)
+            log_std = np.ones_like(exp_act)*np.log(0.5)
+            log_p = gaussian_likelihood(np.array(act_list), exp_act, log_std)
+            p = np.exp(log_p)
 
-        log_p = gaussian_likelihood(act, mu, log_std)
-        p=np.exp(log_p)
-
-        cost=np.array(p<=threshold,dtype=np.float32)
+        cost = np.array(p <= threshold, dtype=np.float32)
 
         return cost
 
     start_time = time.time()
-    o, r, d, c, ep_ret, ep_cost, ep_len = env.reset(), 0, False, 0, 0, 0, 0
+    o, r, d, c, ep_ret, ep_env_cost, ep_act_cost, ep_len = env.reset(), 0, False, 0, 0, 0, 0, 0
     cur_penalty = 0
-    cum_cost = 0
+    cum_env_cost = 0
+    cum_act_cost = 0
 
     for epoch in range(epochs):
 
@@ -373,6 +383,7 @@ def run_polopt_agent(env_fn,
 
         pi_info_list = []
         obs_list = []
+        act_list = []
         for t in range(local_steps_per_epoch):
 
             # Possibly render
@@ -392,12 +403,14 @@ def run_polopt_agent(env_fn,
             o2, r, d, info = env.step(a)
             obs_list.append(o)
             pi_info_list.append(pi_info_t)
+            act_list.append(a[0])
 
             # Include penalty on cost
             c = info.get('cost', 0)
 
             # Track cumulative cost over training
-            cum_cost += c
+            cum_env_cost += c
+            ep_env_cost += c
 
             # save and log
             buf.store(o, a, r, v_t, c, vc_t, logp_t, pi_info_t)
@@ -405,7 +418,6 @@ def run_polopt_agent(env_fn,
 
             o = o2
             ep_ret += r
-            ep_cost += c
             ep_len += 1
 
             terminal = d or (ep_len == max_ep_len)
@@ -423,23 +435,29 @@ def run_polopt_agent(env_fn,
                     else:
                         last_val, last_cval = sess.run([v, vc], feed_dict=feed_dict)
 
-                cost_list = compute_dis_cost(obs_list, pi_info_list)
-                buf.cost_buf[buf.path_start_idx:buf.path_start_idx+len(cost_list)] = cost_list.copy()
+                cost_list = compute_dis_cost(obs_list, pi_info_list, act_list)
+                if add_env_cost:
+                    buf.cost_buf[buf.path_start_idx:buf.path_start_idx + len(cost_list)] += cost_list.copy()
+                else:
+                    buf.cost_buf[buf.path_start_idx:buf.path_start_idx + len(cost_list)] = cost_list.copy()
+
                 buf.finish_path(last_val, last_cval)
+                ep_act_cost = sum(cost_list)
+                cum_act_cost += ep_act_cost
 
                 # Only save EpRet / EpLen if trajectory finished
                 if terminal:
-                    print('Env_cost:', ep_cost, 'threshold:', threshold)
-                    logger.store(EpRet=ep_ret, EpLen=ep_len, EpCost=ep_cost)
+                    logger.store(EpRet=ep_ret, EpLen=ep_len, EpActCost=ep_act_cost, EpEnvCost=ep_env_cost)
                 else:
                     print('Warning: trajectory cut off by epoch at %d steps.' % ep_len)
 
                 # Reset environment
-                o, r, d, c, ep_ret, ep_len, ep_cost = env.reset(), 0, False, 0, 0, 0, 0
+                o, r, d, c, ep_ret, ep_len, ep_env_cost, ep_act_cost = env.reset(), 0, False, 0, 0, 0, 0, 0
                 pi_info_list = []
                 obs_list = []
+                act_list = []
 
-        threshold = threshold-annealing_factor
+        threshold = threshold - annealing_factor
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs - 1):
@@ -453,8 +471,11 @@ def run_polopt_agent(env_fn,
         # =====================================================================#
         #  Cumulative cost calculations                                       #
         # =====================================================================#
-        cumulative_cost = mpi_sum(cum_cost)
-        cost_rate = cumulative_cost / ((epoch + 1) * steps_per_epoch)
+        cumulative_env_cost = mpi_sum(cum_env_cost)
+        cost_env_rate = cumulative_env_cost / ((epoch + 1) * steps_per_epoch)
+
+        cumulative_act_cost = mpi_sum(cum_act_cost)
+        cost_act_rate = cumulative_act_cost / ((epoch + 1) * steps_per_epoch)
 
         # =====================================================================#
         #  Log performance and stats                                          #
@@ -464,10 +485,13 @@ def run_polopt_agent(env_fn,
 
         # Performance stats
         logger.log_tabular('EpRet', with_min_and_max=True)
-        logger.log_tabular('EpCost', with_min_and_max=True)
+        logger.log_tabular('EpEnvCost', with_min_and_max=True)
+        logger.log_tabular('EpActCost', with_min_and_max=True)
         logger.log_tabular('EpLen', average_only=True)
-        logger.log_tabular('CumulativeCost', cumulative_cost)
-        logger.log_tabular('CostRate', cost_rate)
+        logger.log_tabular('CumulativeEnvCost', cumulative_env_cost)
+        logger.log_tabular('CostEnvRate', cost_env_rate)
+        logger.log_tabular('CumulativeActCost', cumulative_act_cost)
+        logger.log_tabular('CostActRate', cost_act_rate)
 
         # Value function values
         logger.log_tabular('VVals', with_min_and_max=True)

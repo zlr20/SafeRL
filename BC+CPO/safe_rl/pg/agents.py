@@ -242,7 +242,7 @@ class CPOAgent(TrustRegionAgent):
         # Need old params, old policy cost gap (epcost - limit), 
         # and surr_cost rescale factor (equal to average eplen).
         old_params = self.sess.run(get_pi_params)
-        c = self.logger.get_stats('EpCost')[0] - cost_lim
+        c = self.logger.get_stats('EpActCost')[0] - cost_lim
         rescale = self.logger.get_stats('EpLen')[0]
 
         # Consider the right margin

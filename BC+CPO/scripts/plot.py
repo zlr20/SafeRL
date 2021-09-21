@@ -268,10 +268,10 @@ def make_plots(all_logdirs, legend=None, xaxis=None, values=None, count=False,
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--logdir', default=['/home/yzc/Desktop/safe-rl/BC+CPO/data/2021-09-16_cpo_PointGoal1/2021-09-16_22-13-44-cpo_PointGoal1_s0'], nargs='*')
+    parser.add_argument('--logdir', default=['/home/yzc/Desktop/safe-rl/BC+CPO/data/2021-09-20_cpo_PointGoal1/2021-09-20_16-02-44-cpo_PointGoal1_s1'], nargs='*')
     parser.add_argument('--legend', '-l', nargs='*')
     parser.add_argument('--xaxis', '-x', default='TotalEnvInteracts')
-    parser.add_argument('--value', '-y', default='CostRate', nargs='*')
+    parser.add_argument('--value', '-y', default=['CostEnvRate', 'CostActRate', 'AverageEpRet', 'AverageEpEnvCost', 'AverageEpActCost'], nargs='*')
     parser.add_argument('--count', action='store_true')
     parser.add_argument('--smooth', '-s', type=int, default=1)
     parser.add_argument('--select', nargs='*')
